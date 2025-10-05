@@ -1,34 +1,34 @@
 import requests
-from dataclasses import dataclass
-from typing import List, Tuple, Literal, Dict, Field
+from dataclasses import dataclass, field
+from typing import List, Tuple, Literal, Dict
 
 ACtiontype=Literal['state-changing', 'state-preserving']
 
 @dataclass
 class role:
     name: str
-    cookies: Dict[str, str] = Field(default_factory=dict)
-    role:str
+    rank:int
+    cookies: Dict[str, str] = field(default_factory=dict)
 
 @dataclass
 class Requesttype:
     method: str
     endpoint: str
-    headers: Dict[str, str] = Field(default_factory=dict)
-    headers: Dict[str, str] = Field(default_factory=dict)
+    headers: Dict[str, str] = field(default_factory=dict)
+    
 
 @dataclass
 class Action:
-    HTTP_request: Requesttype
-    type: ACtiontype
     id: str
+    type: ACtiontype
+    HTTP_request: Requesttype
 
 @ dataclass
 class usecase:
     role: str
     action: Action
-    dependencies: List[Tuple[str, str]] = Field(default_factory=list) # dependencies in form of [(action_id, role)]
-    cancellation: List[Tuple[str, str]] = Field(default_factory=list) # cancellation in form of [(action_id, role)]
+    dependencies: List[Tuple[str, str]] = field(default_factory=list) # dependencies in form of [(action_id, role)]
+    cancellation: List[Tuple[str, str]] = field(default_factory=list) # cancellation in form of [(action_id, role)]
     
 # Static configuration for now
 
@@ -42,41 +42,55 @@ ACTIONS: List[Action] = [
     Action(
         id="login",
         type="state-changing",
-        representative=Requesttype(
+        HTTP_request=Requesttype(
             method="POST",
-            path_template="/login",
-            body_template={"username": "{user}", "password": "{pass}"}
+            endpoint="/login",
+            headers={"username": "{user}", "password": "{pass}"}
         ),
-        description="Authenticate a user"
     ),
     Action(
         id="view_course",
         type="state-preserving",
-        representative=Requesttype(
+        HTTP_request=Requesttype(
             method="GET",
-            path_template="/courses/{course_id}"
+            endpoint="/courses/{course_id}"
         ),
-        description="View course details page"
     ),
     Action(
         id="create_course",
         type="state-changing",
-        representative=Requesttype(
+        HTTP_request=Requesttype(
             method="POST",
-            path_template="/api/courses",
-            body_template={"title": "{title}", "desc": "{desc}"}
+            endpoint="/api/courses",
+            headers={"title": "{title}", "desc": "{desc}"}
         ),
-        description="Create a new course (Admin only)"
+        
     ),
 ]
 
-USE_CASES: List[usecase] = [
-    usecase("login",         role="Student"),
-    usecase("view_course",   role="Student", deps=[("login", "Student")]),
-    usecase("login",         role="Admin"),
-    usecase("create_course", role="Admin",   deps=[("login", "Admin")]),
-]
+ACTION_BY_ID = {a.id: a for a in ACTIONS}
 
+
+USE_CASES: List[usecase] = [
+    usecase(
+        role="Student",
+        action=ACTION_BY_ID["login"],
+    ),
+    usecase(
+        role="Student",
+        action=ACTION_BY_ID["view_course"],
+        dependencies=[("login", "Student")],
+    ),
+    usecase(
+        role="Admin",
+        action=ACTION_BY_ID["login"],
+    ),
+    usecase(
+        role="Admin",
+        action=ACTION_BY_ID["create_course"],
+        dependencies=[("login", "Admin")],
+    ),
+]
 # Enumerate roles, actions, and use cases
 def index_roles(roles: List[role]) -> Dict[str, role]:
     return {r.name: r for r in roles}
@@ -92,7 +106,7 @@ def index_actions(actions: List[Action]) -> Dict[str, Action]:
 def index_use_cases(ucs: List[usecase]) -> Dict[Tuple[str, str], usecase]:
     ix: Dict[Tuple[str, str], usecase] = {}
     for uc in ucs:
-        key = (uc.action_id, uc.role)
+        key = (uc.action.id, uc.role)
         if key in ix:
             raise ValueError(f"Duplicate usecase: {key}")
         ix[key] = uc
@@ -105,19 +119,22 @@ def enumerate_all() -> None:
     uc_ix     = index_use_cases(USE_CASES)
     #validate_graph(role_ix, action_ix, uc_ix)
 
-    print(f"Base URL: {BASE_URL}\n")
+    #print(f"Base URL: {BASE_URL}\n")
     print("Roles:")
     for r in role_ix.values():
         print(f"  - {r.name} (rank={r.rank}) cookies={bool(r.cookies)}")
 
     print("\nActions:")
     for a in action_ix.values():
-        tmpl = a.representative
-        print(f"  - {a.id} [{a.type}] {tmpl.method} {tmpl.path_template}")
+        tmpl = a.HTTP_request
+        print(f"  - {a.id} [{a.type}] {tmpl.method} {tmpl.endpoint}")
 
     print("\nUseCases (action, role):")
     for (aid, role), uc in uc_ix.items():
-        print(f"  - ({aid}, {role}) deps={uc.deps or '-'} cancels={uc.cancels or '-'}")
+        print(f"  - ({aid}, {role}) deps={uc.dependencies or '-'} cancels={uc.cancellation or '-'}")
 
 if __name__ == "__main__":
     enumerate_all()
+
+
+
