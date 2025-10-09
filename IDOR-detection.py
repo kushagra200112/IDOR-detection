@@ -2,9 +2,10 @@ import requests
 from dataclasses import dataclass, field
 from typing import List, Tuple, Literal, Dict, Optional
 import uuid
+from typing import Set, Iterable
 
 ACtiontype=Literal['state-changing', 'state-preserving']
-
+UCKey = Tuple[str, str]  # (action_id, role)
 @dataclass
 class role:
     name: str
@@ -175,6 +176,52 @@ def enumerate_all() -> None:
     print("\nUseCases (action, role):")
     for (aid, role), uc in uc_ix.items():
         print(f"  - ({aid}, {role}) deps={uc.dependencies or '-'} cancels={uc.cancellation or '-'}")
+
+
+def _uc_key(uc: usecase) -> UCKey:
+    return (uc.action.id, uc.role)
+
+def build_uc_graph(ucs: List[usecase]) -> Tuple[
+    Dict[UCKey, usecase],                # uc_by_key
+    Dict[UCKey, Set[UCKey]],             # deps: uc -> set(prereq uc keys)
+    Dict[UCKey, Set[UCKey]],             # cancels: uc -> set(uc keys it cancels)
+    Dict[UCKey, Set[UCKey]]              # dependents: uc -> set(ucs that depend on it)
+]:
+    uc_by_key: Dict[UCKey, usecase] = {}
+    for uc in ucs:
+        k = _uc_key(uc)
+        if k in uc_by_key:
+            raise ValueError(f"Duplicate use case key: {k}")
+        uc_by_key[k] = uc
+
+    deps: Dict[UCKey, Set[UCKey]] = {k: set() for k in uc_by_key}
+    cancels: Dict[UCKey, Set[UCKey]] = {k: set() for k in uc_by_key}
+    dependents: Dict[UCKey, Set[UCKey]] = {k: set() for k in uc_by_key}
+
+    # resolve dependency and cancellation pairs to UC keys
+    def _resolve_pairs(pairs: Iterable[Tuple[str, str]]) -> Set[UCKey]:
+        out = set()
+        for aid, role_name in pairs:
+            key = (aid, role_name)
+            if key not in uc_by_key:
+                print(f"Use case dependency/cancellation refers to unknown use case: {key}")
+                continue
+            out.add(key)
+        return out
+
+    for k, uc in uc_by_key.items():
+        # dependencies (prerequisites)
+        deps[k] = _resolve_pairs(uc.dependencies)
+        # cancellations
+        cancels[k] = _resolve_pairs(uc.cancellation)
+
+    # build reverse edges (dependents) for counting “satisfied dependencies” metric
+    for k, pres in deps.items():
+        for p in pres:
+            if p in dependents:
+                dependents[p].add(k)
+
+    return uc_by_key, deps, cancels, dependents
 
 if __name__ == "__main__":
     enumerate_all()
