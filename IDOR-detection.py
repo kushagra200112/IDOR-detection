@@ -223,6 +223,91 @@ def build_uc_graph(ucs: List[usecase]) -> Tuple[
 
     return uc_by_key, deps, cancels, dependents
 
+def traverse_use_case_graph(ucs: List[usecase]) -> List[UCKey]:
+    uc_by_key, deps, cancels, dependents = build_uc_graph(ucs)
+
+    all_keys: Set[UCKey] = set(uc_by_key.keys())
+    visited: Set[UCKey] = set()
+    canceled: Set[UCKey] = set()  # UCs removed due to cancellation
+    UCL: List[UCKey] = []
+
+    def is_available(k: UCKey) -> bool:
+        if k in visited or k in canceled:
+            return False
+        # available if all prereqs are visited (ignoring ones that were canceled)
+        needed = {p for p in deps[k] if p not in canceled}
+        return needed.issubset(visited)
+
+    def count_cancels(k: UCKey) -> int:
+        # how many *unvisited* UCs would be canceled if we execute k now
+        return len([x for x in cancels[k] if x in all_keys and x not in visited and x not in canceled])
+
+    def count_satisfied_deps(k: UCKey) -> int:
+        # how many remaining UCs currently have k as an unmet prerequisite
+        c = 0
+        for u in dependents.get(k, ()):
+            if u in visited or u in canceled:
+                continue
+            # If k is among dependencies and is not yet visited, executing k satisfies that edge.
+            if k in deps[u]:
+                c += 1
+        return c
+
+    # Initial availability
+    def gather_available() -> List[UCKey]:
+        return sorted([k for k in all_keys if is_available(k)], key=lambda t: (t[0], t[1]))
+
+    available = gather_available()
+
+    # Main loop
+    while True:
+        # stop when all remaining UCs are either visited or canceled
+        remaining = [k for k in all_keys if k not in visited and k not in canceled]
+        if not remaining:
+            break
+
+        # refresh available
+        available = gather_available()
+
+        if not available:
+            # No available UCs left but some remain -> inconsistent graph (e.g., circular deps or canceled prereqs).
+            # Strategy: pick any nonvisited UC with the smallest number of unmet deps (to make progress).
+            candidates = sorted(
+                remaining,
+                key=lambda k: (len([p for p in deps[k] if p not in visited]), k[0], k[1])
+            )
+            chosen = candidates[0]
+        else:
+            #   - minimize cancels
+            #   - maximize satisfied deps
+            #   - deterministic tiebreaker
+            def score(k: UCKey):
+                return (count_cancels(k), -count_satisfied_deps(k), k[0], k[1])
+
+            chosen = sorted(available, key=score)[0]
+
+        # "Execute" chosen UC: record, mark visited
+        UCL.append(chosen)
+        visited.add(chosen)
+
+        # applying cancellations made by chosen UC
+        for victim in cancels.get(chosen, ()):
+            if victim not in visited:
+                canceled.add(victim)
+                for w in deps:
+                    if victim in deps[w]:
+                        deps[w].discard(victim)
+
+        # Loop continues; availability recalculated at top
+
+    return UCL
+
+
+def print_ucl(ucl: List[UCKey]) -> None:
+    print("\nUse Case Execution List (UCL):")
+    for i, (aid, rname) in enumerate(ucl, 1):
+        print(f"  {i:02d}. ({aid}, {rname})")
+        
 if __name__ == "__main__":
     enumerate_all()
     role_ix = index_roles(ROLES)
@@ -239,5 +324,8 @@ if __name__ == "__main__":
     for name, user in G2.items():
         ck = dict(user.session.cookies)
         print(f"  - {name}: user_id={user.id} cookies={ck or '-'}")
-
+    
+    # Traverse graph per IV-C and print UCL
+    UCL = traverse_use_case_graph(USE_CASES)
+    print_ucl(UCL)
 
