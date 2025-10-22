@@ -75,14 +75,18 @@ def create_two_user_groups(roles_ix: Dict[str, role]) -> Tuple[Dict[str, User], 
         group2[rname] = _create_user_for_role(r, "G2")
     return group1, group2
 # Static configuration for now
-
+# Privilege lattice: Admin(3) > Instructor(2) > Student(1) > Public(0)
 ROLES: List[role] = [
-    role("Admin",   rank=2, cookies={"PHPSESSID": "admin_cookie_val"}),   # put real cookie later
-    role("Student", rank=1, cookies={"PHPSESSID": "student_cookie_val"}),
-    role("Public",  rank=0, cookies={}),
+    role("Admin",      rank=3, cookies={"PHPSESSID": "admin_cookie_val"}),
+    role("Instructor", rank=2, cookies={"PHPSESSID": "instructor_cookie_val"}),
+    role("Student",    rank=1, cookies={"PHPSESSID": "student_cookie_val"}),
+    role("Public",     rank=0, cookies={}),
 ]
 
+# Actions intentionally include both state-preserving (GET) and state-changing (POST)
+# across typical IDOR hot-spots: user profiles, grade views, invoices, and course ops.
 ACTIONS: List[Action] = [
+    # --- Auth & session ---
     Action(
         id="login",
         type="state-changing",
@@ -93,13 +97,29 @@ ACTIONS: List[Action] = [
         ),
     ),
     Action(
+        id="logout",
+        type="state-changing",
+        HTTP_request=Requesttype(method="POST", endpoint="/logout"),
+    ),
+
+    # --- Global navigation / seeds for crawl ---
+    Action(
+        id="view_dashboard",
+        type="state-preserving",
+        HTTP_request=Requesttype(method="GET", endpoint="/")
+    ),
+    Action(
+        id="list_courses",
+        type="state-preserving",
+        HTTP_request=Requesttype(method="GET", endpoint="/courses")
+    ),
+    Action(
         id="view_course",
         type="state-preserving",
-        HTTP_request=Requesttype(
-            method="GET",
-            endpoint="/courses/{course_id}"
-        ),
+        HTTP_request=Requesttype(method="GET", endpoint="/courses/{course_id}")
     ),
+
+    # --- Course management (sensitive) ---
     Action(
         id="create_course",
         type="state-changing",
@@ -108,34 +128,140 @@ ACTIONS: List[Action] = [
             endpoint="/api/courses",
             headers={"title": "{title}", "desc": "{desc}"}
         ),
-        
+    ),
+    Action(
+        id="delete_course",
+        type="state-changing",
+        HTTP_request=Requesttype(
+            method="POST",
+            endpoint="/api/courses/{course_id}/delete"
+        ),
+    ),
+    Action(
+        id="enroll_student",
+        type="state-changing",
+        HTTP_request=Requesttype(
+            method="POST",
+            endpoint="/api/courses/{course_id}/enroll",
+            headers={"userId": "{user_id}"}
+        ),
+    ),
+
+    # --- Gradebook and student views (classic IDOR) ---
+    Action(
+        id="gradebook_view",
+        type="state-preserving",
+        HTTP_request=Requesttype(
+            method="GET",
+            endpoint="/instructor/courses/{course_id}/grades"
+        ),
+    ),
+    Action(
+        id="student_grades_view",
+        type="state-preserving",
+        HTTP_request=Requesttype(
+            method="GET",
+            endpoint="/student/courses/{course_id}/grades"
+        ),
+    ),
+
+    # --- User profiles (classic IDOR) ---
+    Action(
+        id="view_profile",
+        type="state-preserving",
+        HTTP_request=Requesttype(method="GET", endpoint="/users/{user_id}")
+    ),
+    Action(
+        id="update_profile",
+        type="state-changing",
+        HTTP_request=Requesttype(
+            method="POST",
+            endpoint="/users/{user_id}",
+            headers={"email": "{email}", "phone": "{phone}"}
+        ),
+    ),
+
+    # --- Billing artifacts (file/object IDOR) ---
+    Action(
+        id="download_invoice",
+        type="state-preserving",
+        HTTP_request=Requesttype(
+            method="GET",
+            endpoint="/billing/invoices/{invoice_id}.pdf"
+        ),
+    ),
+
+    # --- Admin-only discovery ---
+    Action(
+        id="admin_list_users",
+        type="state-preserving",
+        HTTP_request=Requesttype(method="GET", endpoint="/admin/users")
+    ),
+    Action(
+        id="admin_view_user",
+        type="state-preserving",
+        HTTP_request=Requesttype(method="GET", endpoint="/admin/users/{user_id}")
     ),
 ]
 
 ACTION_BY_ID = {a.id: a for a in ACTIONS}
 
-
+# Use cases: per-role sequences with realistic dependencies.
+# (Cancellations illustrate state invalidation—e.g., deleting a course breaks downstream views.)
 USE_CASES: List[usecase] = [
+    # --- Public (no login) ---
+    usecase(role="Public", action=ACTION_BY_ID["view_dashboard"]),
+    usecase(role="Public", action=ACTION_BY_ID["list_courses"]),
+    usecase(role="Public", action=ACTION_BY_ID["view_course"]),
+    
+    # --- Student ---
+    usecase(role="Student", action=ACTION_BY_ID["login"]),
+    usecase(role="Student", action=ACTION_BY_ID["view_dashboard"], dependencies=[("login", "Student")]),
+    usecase(role="Student", action=ACTION_BY_ID["list_courses"],   dependencies=[("login", "Student")]),
+    usecase(role="Student", action=ACTION_BY_ID["view_course"],    dependencies=[("login", "Student")]),
+    usecase(role="Student", action=ACTION_BY_ID["student_grades_view"], dependencies=[("view_course", "Student")]),
+    usecase(role="Student", action=ACTION_BY_ID["view_profile"],   dependencies=[("login", "Student")]),
+    usecase(role="Student", action=ACTION_BY_ID["update_profile"], dependencies=[("login", "Student")]),
+    usecase(role="Student", action=ACTION_BY_ID["download_invoice"], dependencies=[("login", "Student")]),
+    usecase(role="Student", action=ACTION_BY_ID["logout"], dependencies=[("login", "Student")]),
+
+    # --- Instructor ---
+    usecase(role="Instructor", action=ACTION_BY_ID["login"]),
+    usecase(role="Instructor", action=ACTION_BY_ID["create_course"], dependencies=[("login", "Instructor")]),
+    usecase(role="Instructor", action=ACTION_BY_ID["list_courses"],   dependencies=[("login", "Instructor")]),
+    usecase(role="Instructor", action=ACTION_BY_ID["view_course"],    dependencies=[("create_course", "Instructor")]),
+    usecase(role="Instructor", action=ACTION_BY_ID["gradebook_view"], dependencies=[("view_course", "Instructor")]),
+    usecase(role="Instructor", action=ACTION_BY_ID["enroll_student"], dependencies=[("create_course", "Instructor")]),
+    # If an instructor deletes the course, it cancels some student/instructor views for that course
     usecase(
-        role="Student",
-        action=ACTION_BY_ID["login"],
+        role="Instructor",
+        action=ACTION_BY_ID["delete_course"],
+        dependencies=[("create_course", "Instructor")],
+        cancellation=[
+            ("view_course", "Student"),
+            ("student_grades_view", "Student"),
+            ("view_course", "Instructor"),
+            ("gradebook_view", "Instructor")
+        ]
     ),
-    usecase(
-        role="Student",
-        action=ACTION_BY_ID["view_course"],
-        dependencies=[("login", "Student")],
-    ),
-    usecase(
-        role="Admin",
-        action=ACTION_BY_ID["login"],
-    ),
-    usecase(
-        role="Admin",
-        action=ACTION_BY_ID["create_course"],
-        dependencies=[("login", "Admin")],
-    ),
+    usecase(role="Instructor", action=ACTION_BY_ID["logout"], dependencies=[("login", "Instructor")]),
+
+    # --- Admin ---
+    usecase(role="Admin", action=ACTION_BY_ID["login"]),
+    usecase(role="Admin", action=ACTION_BY_ID["admin_list_users"], dependencies=[("login", "Admin")]),
+    usecase(role="Admin", action=ACTION_BY_ID["admin_view_user"],  dependencies=[("admin_list_users", "Admin")]),
+    usecase(role="Admin", action=ACTION_BY_ID["create_course"],    dependencies=[("login", "Admin")]),
+    usecase(role="Admin", action=ACTION_BY_ID["delete_course"],    dependencies=[("create_course", "Admin")]),
+    usecase(role="Admin", action=ACTION_BY_ID["logout"],           dependencies=[("login", "Admin")]),
 ]
-# Enumerate roles, actions, and use cases
+
+# Optional: handy defaults for parameter placeholders (works with the executor snippet I gave you)
+CTX_DEFAULTS = {
+    "Admin":      {"user": "admin",      "pass": "adminpw",      "course_id": "101", "user_id": "1",  "title": "Sec101", "desc": "Intro", "email": "admin@example.com", "phone": "000-000"},
+    "Instructor": {"user": "instructor", "pass": "instructorpw", "course_id": "102", "user_id": "2",  "title": "Forensics", "desc": "Lab", "email": "inst@example.com", "phone": "111-111"},
+    "Student":    {"user": "student",    "pass": "studentpw",    "course_id": "102", "user_id": "10", "invoice_id": "inv-10-2025", "email": "me@student.edu", "phone": "222-222"},
+    "Public":     {"course_id": "102"},
+}# Enumerate roles, actions, and use cases
 def index_roles(roles: List[role]) -> Dict[str, role]:
     return {r.name: r for r in roles}
 
