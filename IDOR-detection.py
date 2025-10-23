@@ -427,7 +427,23 @@ def traverse_use_case_graph(ucs: List[usecase]) -> List[UCKey]:
         # Loop continues; availability recalculated at top
 
     return UCL
+    
+def _render_template_static(s: str, ctx: Dict[str, str]) -> str:   #string with placeholders like {user_id}, {course_id}
+    if not s:
+        return s
+    out = s
+    for k, v in (ctx or {}).items():
+        out = out.replace("{" + k + "}", str(v))
+    return out
 
+def _render_formdata_static(fields: Dict[str, str], ctx: Dict[str, str]) -> Dict[str, str]: # for POST-like form data
+    data = {}
+    for k, v in (fields or {}).items():
+        if isinstance(v, str):
+            data[k] = _render_template_static(v, ctx)
+        else:
+            data[k] = v
+    return data
 
 def print_ucl(ucl: List[UCKey]) -> None:
     print("\nUse Case Execution List (UCL):")
