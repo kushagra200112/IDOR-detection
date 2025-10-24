@@ -444,7 +444,44 @@ def _render_formdata_static(fields: Dict[str, str], ctx: Dict[str, str]) -> Dict
         else:
             data[k] = v
     return data
+def traverse_ucl(ucl: List[UCKey], group1: Dict[str, User], group2: Dict[str, User]):
+    exec_plan: List[Dict] = []
+    for (actionid, roleid) in ucl:
+        if roleid not in group1:
+            raise ValueError(f"Unknown role in UCL: {roleid}")
+            continue
 
+        user= group1[roleid]
+        cookies = dict(user.session.cookies)
+        action = ACTION_BY_ID[actionid]
+        ctx = dict(CTX_DEFAULTS.get(roleid, {}))  # per-role params
+
+        method = action.HTTP_request.method.upper()
+        endpoint = _render_template_static(action.HTTP_request.endpoint, ctx)
+        data = _render_formdata_static(action.HTTP_request.headers, ctx) if method != "GET" else {}
+
+        record = {
+            "action_id": actionid,
+            "role": roleid,
+            "user_id": user.id,
+            "method": method,
+            "endpoint_rendered": endpoint,   
+            "form_data_rendered": data,      
+        }
+        exec_plan.append(record)
+
+        print(f"Actions and roles ({actionid}, {roleid})")
+        print(f"    user1,i.id = {user.id}")
+        print(f"    METHOD     = {method}")
+        print(f"    ENDPOINT   = {endpoint}")
+        if method != "GET":
+            print(f"    FORM DATA  = {data or '-'}")
+        print()
+
+    return exec_plan
+
+def _is_state_preserving(a: Action) -> bool:
+    return a.type == "state-preserving" and a.HTTP_request.method.upper() == "GET"
 def print_ucl(ucl: List[UCKey]) -> None:
     print("\nUse Case Execution List (UCL):")
     for i, (aid, rname) in enumerate(ucl, 1):
