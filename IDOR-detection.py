@@ -74,7 +74,9 @@ def create_two_user_groups(roles_ix: Dict[str, role]) -> Tuple[Dict[str, User], 
         group1[rname] = _create_user_for_role(r, "G1")
         group2[rname] = _create_user_for_role(r, "G2")
     return group1, group2
-# Static configuration for now
+
+# Static configuration
+
 # Privilege lattice: Admin(3) > Instructor(2) > Student(1) > Public(0)
 ROLES: List[role] = [
     role("Admin",      rank=3, cookies={"PHPSESSID": "admin_cookie_val"}),
@@ -261,7 +263,9 @@ CTX_DEFAULTS = {
     "Instructor": {"user": "instructor", "pass": "instructorpw", "course_id": "102", "user_id": "2",  "title": "Forensics", "desc": "Lab", "email": "inst@example.com", "phone": "111-111"},
     "Student":    {"user": "student",    "pass": "studentpw",    "course_id": "102", "user_id": "10", "invoice_id": "inv-10-2025", "email": "me@student.edu", "phone": "222-222"},
     "Public":     {"course_id": "102"},
-}# Enumerate roles, actions, and use cases
+}
+
+# Enumerate roles, actions, and use cases
 def index_roles(roles: List[role]) -> Dict[str, role]:
     return {r.name: r for r in roles}
 
@@ -315,7 +319,7 @@ def build_uc_graph(ucs: List[usecase]) -> Tuple[
 ]:
     uc_by_key: Dict[UCKey, usecase] = {}
     for uc in ucs:
-        k = _uc_key(uc)
+        k = _uc_key(uc) # k=(uc.action.id, uc.role)
         if k in uc_by_key:
             raise ValueError(f"Duplicate use case key: {k}")
         uc_by_key[k] = uc
@@ -352,7 +356,7 @@ def build_uc_graph(ucs: List[usecase]) -> Tuple[
 def traverse_use_case_graph(ucs: List[usecase]) -> List[UCKey]:
     uc_by_key, deps, cancels, dependents = build_uc_graph(ucs)
 
-    all_keys: Set[UCKey] = set(uc_by_key.keys())
+    all_keys: Set[UCKey] = set(uc_by_key.keys()) # UCKey=action.id, role and keys are all use cases
     visited: Set[UCKey] = set()
     canceled: Set[UCKey] = set()  # UCs removed due to cancellation
     UCL: List[UCKey] = []
@@ -361,7 +365,7 @@ def traverse_use_case_graph(ucs: List[usecase]) -> List[UCKey]:
         if k in visited or k in canceled:
             return False
         # available if all prereqs are visited (ignoring ones that were canceled)
-        needed = {p for p in deps[k] if p not in canceled}
+        needed = {p for p in deps[k] if p not in canceled} #k is UCKey where p is prereq UCKey and looks like {(action.id, role)} and deps[k] is set of prereq UCKeys for k and looks like {(action.id, role)}
         return needed.issubset(visited)
 
     def count_cancels(k: UCKey) -> int:
@@ -413,21 +417,20 @@ def traverse_use_case_graph(ucs: List[usecase]) -> List[UCKey]:
             chosen = sorted(available, key=score)[0]
 
         # "Execute" chosen UC: record, mark visited
-        UCL.append(chosen)
-        visited.add(chosen)
+        UCL.append(chosen) # adding to UCL marks that it is executed
+        visited.add(chosen) # visited marks that it is executed
 
         # applying cancellations made by chosen UC
         for victim in cancels.get(chosen, ()):
-            if victim not in visited:
+            if victim not in visited: # we check visited to avoid removing already executed UCs
                 canceled.add(victim)
-                for w in deps:
+                for w in deps: # this step removes the canceled UC from dependencies of other UCs
                     if victim in deps[w]:
                         deps[w].discard(victim)
 
         # Loop continues; availability recalculated at top
 
     return UCL
-    
 def _render_template_static(s: str, ctx: Dict[str, str]) -> str:   #string with placeholders like {user_id}, {course_id}
     if not s:
         return s
@@ -444,6 +447,7 @@ def _render_formdata_static(fields: Dict[str, str], ctx: Dict[str, str]) -> Dict
         else:
             data[k] = v
     return data
+
 def traverse_ucl(ucl: List[UCKey], group1: Dict[str, User], group2: Dict[str, User]):
     exec_plan: List[Dict] = []
     for (actionid, roleid) in ucl:
@@ -465,8 +469,8 @@ def traverse_ucl(ucl: List[UCKey], group1: Dict[str, User], group2: Dict[str, Us
             "role": roleid,
             "user_id": user.id,
             "method": method,
-            "endpoint_rendered": endpoint,   
-            "form_data_rendered": data,      
+            "endpoint_rendered": endpoint,   # placeholders resolved
+            "form_data_rendered": data,      # for POST-like actions
         }
         exec_plan.append(record)
 
@@ -482,6 +486,152 @@ def traverse_ucl(ucl: List[UCKey], group1: Dict[str, User], group2: Dict[str, Us
 
 def _is_state_preserving(a: Action) -> bool:
     return a.type == "state-preserving" and a.HTTP_request.method.upper() == "GET"
+
+def build_crawl_seeds_static_for_role(ucl: List[UCKey], role_name: str) -> List[str]:
+    """
+    From the UCL, pick only this role's state-preserving actions and render their endpoints.
+    (No network; this is just the set of URLs we'd crawl.)
+    """
+    seeds: List[str] = []
+    for (actionid, rname) in ucl:
+        if rname != role_name:
+            continue
+        a = ACTION_BY_ID[actionid]
+        if not _is_state_preserving(a):
+            continue
+        ep = _render_template_static(a.HTTP_request.endpoint, dict(CTX_DEFAULTS.get(role_name, {})))
+        seeds.append(ep)
+    # include a root seed (common start point)
+    if "/" not in seeds:
+        seeds.insert(0, "/")
+    # de-dup, preserve order
+    return list(dict.fromkeys(seeds))
+
+def execute_state_preserving(ucl: List[UCKey],
+                     group1: Dict[str, User],
+                     group2: Dict[str, User]) -> Dict[Tuple[str, str], List[str]]:
+    
+    sitemaps: Dict[Tuple[str, str], List[str]] = {}
+
+    # Group 1
+    for role_name in group1.keys():
+        seeds = build_crawl_seeds_static_for_role(ucl, role_name)
+        sitemaps[("G1", role_name)] = seeds
+        print(f" G1:{role_name} crawl seeds ({len(seeds)}):")
+        for s in seeds:
+            print(f"   - {s}")
+        print()
+
+    # Group 2 
+    for role_name in group2.keys():
+        seeds = build_crawl_seeds_static_for_role(ucl, role_name)
+        sitemaps[("G2", role_name)] = seeds
+        print(f" G2:{role_name} crawl seeds ({len(seeds)}):")
+        for s in seeds:
+            print(f"   - {s}")
+        print()
+
+    return sitemaps
+
+def role_not_less_privileged(r1: role, r2: role) -> bool:
+    """Return True if role1 is not less privileged than role2 (i.e., rank1 >= rank2)."""
+    return r1.rank >= r2.rank
+
+def _extract_numeric(path: str) -> Optional[str]:
+    import re
+    m = re.search(r"/(\d+)(?:/|$)", path)
+    return m.group(1) if m else None
+
+def _heuristic_flags(url: str, attacker_role: str) -> List[str]:
+    flags: List[str] = []
+
+    # Admin namespace seen by non-admin
+    if url.startswith("/admin") and attacker_role != "Admin":
+        flags.append("admin_namespace_visible")
+
+    # Other users' profile paths (/users/{id}) seen by non-admin
+    if url.startswith("/users/") and attacker_role != "Admin":
+        uid_in_url = _extract_numeric(url)
+        atk_uid = CTX_DEFAULTS.get(attacker_role, {}).get("user_id")
+        # if we can tell it's not the attacker's own id (or no id known), flag it
+        if uid_in_url and (atk_uid is None or str(uid_in_url) != str(atk_uid)):
+            flags.append("cross_user_profile_candidate")
+
+    # Instructor-only resources visible to Student
+    if "/instructor/" in url and attacker_role == "Student":
+        flags.append("instructor_area_visible")
+
+    # Invoice artifacts visible to non-admin
+    if "/billing/invoices/" in url and attacker_role != "Admin":
+        flags.append("billing_artifact_visible")
+
+    # Gradebook endpoints visible to non-instructor
+    if url.endswith("/grades") and "/instructor/" in url and attacker_role not in ("Admin", "Instructor"):
+        flags.append("gradebook_visible")
+
+    return flags
+
+def differential_analysis(sitemaps: Dict[Tuple[str, str], List[str]],
+                             group1: Dict[str, User],
+                             group2: Dict[str, User]) -> List[Dict]:
+    
+    findings: List[Dict] = []
+    roles_ix = index_roles(ROLES)
+
+    print("\n[Steps 9–17: STATIC DIFFERENTIAL ANALYSIS]")
+    for role1_name, r1 in roles_ix.items():
+        for role2_name, r2 in roles_ix.items():
+            # only if role1 is not less privileged than role2
+            if not role_not_less_privileged(r1, r2):
+                continue
+
+            # users (kept for API symmetry; static mode doesn't use sessions)
+            user1 = group1.get(role1_name)
+            user2 = group2.get(role2_name)
+            if user1 is None or user2 is None:
+                continue
+
+            # sitemaps from Step 8
+            sm1 = set(sitemaps.get(("G1", role1_name), []))
+            sm2 = set(sitemaps.get(("G2", role2_name), []))
+
+            # Step 14: candidates = sm1 \ sm2
+            candidates = sorted(sm1 - sm2)
+            if not candidates:
+                continue
+
+            print(f"  Pair: {role1_name} (priv) → {role2_name} (attacker) | candidates: {len(candidates)}")
+
+            for url in candidates:
+                # Step 14 (static): 'try' by applying heuristics to the candidate URL
+                flags = _heuristic_flags(url, attacker_role=role2_name)
+                if not flags:
+                    continue
+
+                finding = {
+                    "attacker_role": role2_name,
+                    "victim_role": role1_name,
+                    "url": url,
+                    "flags": flags,
+                    "confidence": ("high" if "admin_namespace_visible" in flags
+                                   else "medium" if any(f in flags for f in (
+                                       "cross_user_profile_candidate",
+                                       "billing_artifact_visible",
+                                       "gradebook_visible",
+                                       "instructor_area_visible"
+                                   )) else "low"),
+                }
+                findings.append(finding)
+                # record as an authorization flaw (here: append + print)
+                print(f"    -> FLAGGED: attacker={role2_name} victim={role1_name} url={url} flags={flags}")
+
+    if not findings:
+        print("  No potential flaws flagged in static analysis.")
+    else:
+        print(f"\n[Summary] Potential findings: {len(findings)}")
+
+    return findings
+
 def print_ucl(ucl: List[UCKey]) -> None:
     print("\nUse Case Execution List (UCL):")
     for i, (aid, rname) in enumerate(ucl, 1):
@@ -507,4 +657,6 @@ if __name__ == "__main__":
     # Traverse graph per IV-C and print UCL
     UCL = traverse_use_case_graph(USE_CASES)
     print_ucl(UCL)
-
+    plan = traverse_ucl(UCL, G1, G2)
+    sitemaps=execute_state_preserving(UCL, G1, G2)
+    findings = differential_analysis(sitemaps, G1, G2)
